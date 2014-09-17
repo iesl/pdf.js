@@ -1519,7 +1519,8 @@ var PDFView = {
         continue;
       }
       if (currentHeight > bottom) {
-        break;
+//kzaporojets, load all the pages at once         
+//        break;
       }
       currentWidth = view.el.offsetLeft + view.el.clientLeft;
       viewWidth = view.el.clientWidth;
