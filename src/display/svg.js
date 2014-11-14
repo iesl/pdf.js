@@ -807,18 +807,10 @@ var SVGGraphics = (function SVGGraphicsClosure() {
         var glyph = glyphs[i];
         if (glyph === null) {
           // word break
-          console.log('<space>');
           x += fontDirection * wordSpacing;
           continue;
         } else if (isNum(glyph)) {
-          var xadv = -glyph * fontSize * 0.001;
-          var xprev = x;
           x += -glyph * fontSize * 0.001;
-          console.log('adv: '+xadv+' x= '+xprev+' => '+x+'  x+current.x='+(x+current.x));
-          if (xadv > 1.0) {
-            current.tspan.textContent += ' ';
-            current.xcoords.push((current.x + x - xadv/2) * textHScale);
-          }
           continue;
         }
 
