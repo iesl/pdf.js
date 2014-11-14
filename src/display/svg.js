@@ -810,6 +810,10 @@ var SVGGraphics = (function SVGGraphicsClosure() {
           x += fontDirection * wordSpacing;
           continue;
         } else if (isNum(glyph)) {
+          if (glyph < -200) {
+            current.xcoords.push(current.x + x * textHScale);
+            current.tspan.textContent += ' ';
+          }
           x += -glyph * fontSize * 0.001;
           continue;
         }
