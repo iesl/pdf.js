@@ -854,6 +854,10 @@ var SVGGraphics = (function SVGGraphicsClosure() {
 
         current.tspan.textContent += character;
       }
+
+      var lineEndX = current.x + x * textHScale;
+      current.tspan.setAttributeNS(null, 'endX', '' + lineEndX);
+
       if (vertical) {
         current.y -= x * textHScale;
       } else {
