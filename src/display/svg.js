@@ -1030,6 +1030,8 @@ var SVGGraphics = (function SVGGraphicsClosure() {
 
     clip: function SVGGraphics_clip(type) {
       var current = this.current;
+
+      if (!current.element) return;
       // Add current path to clipping path
       current.clipId = 'clippath' + clipCount;
       clipCount++;
