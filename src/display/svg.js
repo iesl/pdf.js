@@ -807,7 +807,11 @@ var SVGGraphics = (function SVGGraphicsClosure() {
         current.x += x * textHScale;
       }
 
-      if (current.tspan.textContent.match(/[\cA-\cZ]/)) {
+      //remove unknown chars
+      var unknownCharPattern = "[" + _.map(_.range(32), function(i) {
+        return String.fromCharCode(i);
+      }).join("") + "]";
+      if (current.tspan.textContent.match(new RegExp(unknownCharPattern))) {
         current.tspan.textContent = '';
       }
 
