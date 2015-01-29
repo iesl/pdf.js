@@ -1274,8 +1274,8 @@ var SVGGraphics = (function SVGGraphicsClosure() {
         var height = bbox[3] - bbox[1];
 
         var cliprect = document.createElementNS(NS, 'svg:rect');
-        cliprect.setAttributeNS(null, 'x', bbox[0]);
-        cliprect.setAttributeNS(null, 'y', bbox[1]);
+        cliprect.setAttributeNS(null, 'x', bbox[0].toString());
+        cliprect.setAttributeNS(null, 'y', bbox[1].toString());
         cliprect.setAttributeNS(null, 'width', pf(width));
         cliprect.setAttributeNS(null, 'height', pf(height));
         this.current.element = cliprect;
