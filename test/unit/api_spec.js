@@ -8,6 +8,7 @@
 describe('api', function() {
   // TODO run with worker enabled
   var basicApiUrl = combineUrl(window.location.href, '../pdfs/basicapi.pdf');
+  var basicApiFileLength = 105779; // bytes
   function waitsForPromiseResolved(promise, successCallback) {
     var data;
     promise.then(function(val) {
@@ -72,7 +73,7 @@ describe('api', function() {
           typedArrayPdf = new Uint8Array(request.response);
         }
         // Sanity check to make sure that we fetched the entire PDF file.
-        expect(typedArrayPdf.length).toEqual(105779);
+        expect(typedArrayPdf.length).toEqual(basicApiFileLength);
 
         var promise = PDFJS.getDocument(typedArrayPdf);
         waitsForPromiseResolved(promise, function(data) {
@@ -122,6 +123,13 @@ describe('api', function() {
                                           0, 841.89, null] });
       });
     });
+    it('gets a destination', function() {
+      var promise = doc.getDestination('chapter1');
+      waitsForPromiseResolved(promise, function(data) {
+        expect(data).toEqual([{ gen: 0, num: 17 }, { name: 'XYZ' },
+                              0, 841.89, null]);
+      });
+    });
     it('gets attachments', function() {
       var promise = doc.getAttachments();
       waitsForPromiseResolved(promise, function (data) {
@@ -155,13 +163,14 @@ describe('api', function() {
     it('gets data', function() {
       var promise = doc.getData();
       waitsForPromiseResolved(promise, function (data) {
-        expect(true).toEqual(true);
+        expect(data instanceof Uint8Array).toEqual(true);
+        expect(data.length).toEqual(basicApiFileLength);
       });
     });
     it('gets filesize in bytes', function() {
       var promise = doc.getDownloadInfo();
       waitsForPromiseResolved(promise, function (data) {
-        expect(data.length).toEqual(105779);
+        expect(data.length).toEqual(basicApiFileLength);
       });
     });
     it('gets stats', function() {
