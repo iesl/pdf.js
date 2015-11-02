@@ -14,10 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* globals error, PDFJS, assert, info, shadow, TextRenderingMode,
-           FONT_IDENTITY_MATRIX, Uint32ArrayView, IDENTITY_MATRIX, ImageData,
-           ImageKind, isArray, isNum, TilingPattern, OPS, Util, warn,
-           getShadingPatternFromIR, WebGLUtils */
+/* globals IDENTITY_MATRIX, FONT_IDENTITY_MATRIX, TextRenderingMode, ImageData,
+           ImageKind, PDFJS, Uint32ArrayView, error, WebGLUtils, OPS, warn,
+           shadow, isNum, Util, TilingPattern, getShadingPatternFromIR, isArray,
+           info, assert, UnsupportedManager, UNSUPPORTED_FEATURES */
 
 'use strict';
 
@@ -46,11 +46,8 @@ function createScratchCanvas(width, height) {
 }
 
 function addContextCurrentTransform(ctx) {
-  // If the context doesn't expose a `mozCurrentTransform`, add a JS based on.
+  // If the context doesn't expose a `mozCurrentTransform`, add a JS based one.
   if (!ctx.mozCurrentTransform) {
-    // Store the original context
-    ctx._scaleX = ctx._scaleX || 1.0;
-    ctx._scaleY = ctx._scaleY || 1.0;
     ctx._originalSave = ctx.save;
     ctx._originalRestore = ctx.restore;
     ctx._originalRotate = ctx.rotate;
@@ -59,7 +56,7 @@ function addContextCurrentTransform(ctx) {
     ctx._originalTransform = ctx.transform;
     ctx._originalSetTransform = ctx.setTransform;
 
-    ctx._transformMatrix = [ctx._scaleX, 0, 0, ctx._scaleY, 0, 0];
+    ctx._transformMatrix = ctx._transformMatrix || [1, 0, 0, 1, 0, 0];
     ctx._transformStack = [];
 
     Object.defineProperty(ctx, 'mozCurrentTransform', {
@@ -435,6 +432,8 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
     this.smaskCounter = 0;
     this.tempSMask = null;
     if (canvasCtx) {
+      // NOTE: if mozCurrentTransform is polyfilled, then the current state of
+      // the transformation must already be set in canvasCtx._transformMatrix.
       addContextCurrentTransform(canvasCtx);
     }
     this.cachedGetSinglePixelWidth = null;
@@ -971,6 +970,9 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
         this.current = this.stateStack.pop();
         this.ctx.restore();
 
+        // Ensure that the clipping path is reset (fixes issue6413.pdf).
+        this.pendingClip = null;
+
         this.cachedGetSinglePixelWidth = null;
       }
     },
@@ -1097,12 +1099,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           ctx.fill();
           ctx.mozFillRule = 'nonzero';
         } else {
-          try {
-            ctx.fill('evenodd');
-          } catch (ex) {
-            // shouldn't really happen, but browsers might think differently
-            ctx.fill();
-          }
+          ctx.fill('evenodd');
         }
         this.pendingEOFill = false;
       } else {
@@ -1226,7 +1223,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       }
 
       var name = fontObj.loadedName || 'sans-serif';
-      var bold = fontObj.black ? (fontObj.bold ? 'bolder' : 'bold') :
+      var bold = fontObj.black ? (fontObj.bold ? '900' : 'bold') :
                                  (fontObj.bold ? 'bold' : 'normal');
 
       var italic = fontObj.italic ? 'italic' : 'normal';
@@ -1358,6 +1355,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       var textHScale = current.textHScale * fontDirection;
       var glyphsLength = glyphs.length;
       var vertical = font.vertical;
+      var spacingDir = vertical ? 1 : -1;
       var defaultVMetrics = font.defaultVMetrics;
       var widthAdvanceScale = fontSize * current.fontMatrix[0];
 
@@ -1404,7 +1402,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           x += fontDirection * wordSpacing;
           continue;
         } else if (isNum(glyph)) {
-          x += -glyph * fontSize * 0.001;
+          x += spacingDir * glyph * fontSize / 1000;
           continue;
         }
 
@@ -1474,6 +1472,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       var font = current.font;
       var fontSize = current.fontSize;
       var fontDirection = current.fontDirection;
+      var spacingDir = font.vertical ? 1 : -1;
       var charSpacing = current.charSpacing;
       var wordSpacing = current.wordSpacing;
       var textHScale = current.textHScale * fontDirection;
@@ -1481,11 +1480,12 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       var glyphsLength = glyphs.length;
       var isTextInvisible =
         current.textRenderingMode === TextRenderingMode.INVISIBLE;
-      var i, glyph, width;
+      var i, glyph, width, spacingLength;
 
       if (isTextInvisible || fontSize === 0) {
         return;
       }
+      this.cachedGetSinglePixelWidth = null;
 
       ctx.save();
       ctx.transform.apply(ctx, current.textMatrix);
@@ -1501,7 +1501,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           current.x += wordSpacing * textHScale;
           continue;
         } else if (isNum(glyph)) {
-          var spacingLength = -glyph * 0.001 * fontSize;
+          spacingLength = spacingDir * glyph * fontSize / 1000;
           this.ctx.translate(spacingLength, 0);
           current.x += spacingLength * textHScale;
           continue;
@@ -1553,8 +1553,10 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       var pattern;
       if (IR[0] === 'TilingPattern') {
         var color = IR[1];
+        var baseTransform = this.baseTransform ||
+                            this.ctx.mozCurrentTransform.slice();
         pattern = new TilingPattern(IR, color, this.ctx, this.objs,
-                                    this.commonObjs, this.baseTransform);
+                                    this.commonObjs, baseTransform);
       } else {
         pattern = getShadingPatternFromIR(IR);
       }
@@ -2071,6 +2073,11 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
         this.ctx.fillRect(0, 0, 1, 1);
     },
 
+    paintXObject: function CanvasGraphics_paintXObject() {
+      UnsupportedManager.notify(UNSUPPORTED_FEATURES.unknown);
+      warn('Unsupported \'paintXObject\' command.');
+    },
+
     // Marked content
 
     markPoint: function CanvasGraphics_markPoint(tag) {
@@ -2110,12 +2117,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
             ctx.clip();
             ctx.mozFillRule = 'nonzero';
           } else {
-            try {
-              ctx.clip('evenodd');
-            } catch (ex) {
-              // shouldn't really happen, but browsers might think differently
-              ctx.clip();
-            }
+            ctx.clip('evenodd');
           }
         } else {
           ctx.clip();
@@ -2149,4 +2151,3 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
 
   return CanvasGraphics;
 })();
-

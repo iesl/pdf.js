@@ -15,16 +15,65 @@
  * limitations under the License.
  */
 /* globals PDFJS, createPromiseCapability, LocalPdfManager, NetworkPdfManager,
-           NetworkManager, isInt, RANGE_CHUNK_SIZE, MissingPDFException,
+           NetworkManager, isInt, MissingPDFException,
            UnexpectedResponseException, PasswordException, Promise, warn,
            PasswordResponses, InvalidPDFException, UnknownErrorException,
            XRefParseException, Ref, info, globalScope, error, MessageHandler */
 
 'use strict';
 
+var WorkerTask = (function WorkerTaskClosure() {
+  function WorkerTask(name) {
+    this.name = name;
+    this.terminated = false;
+    this._capability = createPromiseCapability();
+  }
+
+  WorkerTask.prototype = {
+    get finished() {
+      return this._capability.promise;
+    },
+
+    finish: function () {
+      this._capability.resolve();
+    },
+
+    terminate: function () {
+      this.terminated = true;
+    },
+
+    ensureNotTerminated: function () {
+      if (this.terminated) {
+        throw new Error('Worker task was terminated');
+      }
+    }
+  };
+
+  return WorkerTask;
+})();
+
 var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
   setup: function wphSetup(handler) {
     var pdfManager;
+    var terminated = false;
+    var cancelXHRs = null;
+    var WorkerTasks = [];
+
+    function ensureNotTerminated() {
+      if (terminated) {
+        throw new Error('Worker was terminated');
+      }
+    }
+
+    function startWorkerTask(task) {
+      WorkerTasks.push(task);
+    }
+
+    function finishWorkerTask(task) {
+      task.finish();
+      var i = WorkerTasks.indexOf(task);
+      WorkerTasks.splice(i, 1);
+    }
 
     function loadDocument(recoveryMode) {
       var loadDocumentCapability = createPromiseCapability();
@@ -61,13 +110,14 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
 
     function getPdfManager(data) {
       var pdfManagerCapability = createPromiseCapability();
+      var pdfManager;
 
       var source = data.source;
       var disableRange = data.disableRange;
       if (source.data) {
         try {
           pdfManager = new LocalPdfManager(source.data, source.password);
-          pdfManagerCapability.resolve();
+          pdfManagerCapability.resolve(pdfManager);
         } catch (ex) {
           pdfManagerCapability.reject(ex);
         }
@@ -75,7 +125,7 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
       } else if (source.chunkedViewerLoading) {
         try {
           pdfManager = new NetworkPdfManager(source, handler);
-          pdfManagerCapability.resolve();
+          pdfManagerCapability.resolve(pdfManager);
         } catch (ex) {
           pdfManagerCapability.reject(ex);
         }
@@ -106,27 +156,11 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
 
           var length = fullRequestXhr.getResponseHeader('Content-Length');
           length = parseInt(length, 10);
-//#if (GENERIC || CHROME)
-          if (fullRequestXhr.status === 206) {
-            // Since Chrome 39, there exists a bug where cached responses are
-            // served with status code 206 for non-range requests.
-            // Content-Length does not specify the total size of the resource
-            // when the status code is 206 (see RFC 2616, section 14.16).
-            // In this case, extract the file size from the Content-Range
-            // header, which is defined to be "bytes start-end/length" for
-            // byte range requests.
-            // See https://github.com/mozilla/pdf.js/issues/5512 and
-            // https://code.google.com/p/chromium/issues/detail?id=442318
-            length = fullRequestXhr.getResponseHeader('Content-Range');
-            length = length && /bytes \d+-\d+\/(\d+)/.exec(length);
-            length = length && parseInt(length[1], 10);
-          }
-//#endif
           if (!isInt(length)) {
             return;
           }
           source.length = length;
-          if (length <= 2 * RANGE_CHUNK_SIZE) {
+          if (length <= 2 * source.rangeChunkSize) {
             // The file size is smaller than the size of two chunks, so it does
             // not make any sense to abort the request and retry with a range
             // request.
@@ -152,6 +186,7 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
           } catch (ex) {
             pdfManagerCapability.reject(ex);
           }
+          cancelXHRs = null;
         },
 
         onProgressiveData: source.disableStream ? null :
@@ -192,10 +227,11 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
           // the data is array, instantiating directly from it
           try {
             pdfManager = new LocalPdfManager(pdfFile, source.password);
-            pdfManagerCapability.resolve();
+            pdfManagerCapability.resolve(pdfManager);
           } catch (ex) {
             pdfManagerCapability.reject(ex);
           }
+          cancelXHRs = null;
         },
 
         onError: function onError(status) {
@@ -210,6 +246,7 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
               ') while retrieving PDF "' + source.url + '".', status);
             handler.send('UnexpectedResponse', exception);
           }
+          cancelXHRs = null;
         },
 
         onProgress: function onProgress(evt) {
@@ -219,6 +256,10 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
           });
         }
       });
+
+      cancelXHRs = function () {
+        networkManager.abortRequest(fullRequestXhrId);
+      };
 
       return pdfManagerCapability.promise;
     }
@@ -252,8 +293,8 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
     });
 
     handler.on('GetDocRequest', function wphSetupDoc(data) {
-
       var onSuccess = function(doc) {
+        ensureNotTerminated();
         handler.send('GetDoc', { pdfInfo: doc });
       };
 
@@ -276,6 +317,8 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
         }
       };
 
+      ensureNotTerminated();
+
       PDFJS.maxImageSize = data.maxImageSize === undefined ?
                            -1 : data.maxImageSize;
       PDFJS.disableFontFace = data.disableFontFace;
@@ -285,13 +328,26 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
                            null : data.cMapUrl;
       PDFJS.cMapPacked = data.cMapPacked === true;
 
-      getPdfManager(data).then(function () {
+      getPdfManager(data).then(function (newPdfManager) {
+        if (terminated) {
+          // We were in a process of setting up the manager, but it got
+          // terminated in the middle.
+          newPdfManager.terminate();
+          throw new Error('Worker was terminated');
+        }
+
+        pdfManager = newPdfManager;
+
         handler.send('PDFManagerReady', null);
         pdfManager.onLoadedStream().then(function(stream) {
           handler.send('DataLoaded', { length: stream.bytes.byteLength });
         });
       }).then(function pdfManagerReady() {
+        ensureNotTerminated();
+
         loadDocument(false).then(onSuccess, function loadFailure(ex) {
+          ensureNotTerminated();
+
           // Try again with recoveryMode == true
           if (!(ex instanceof XRefParseException)) {
             if (ex instanceof PasswordException) {
@@ -306,6 +362,8 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
 
           pdfManager.requestLoadedStream();
           pdfManager.onLoadedStream().then(function() {
+            ensureNotTerminated();
+
             loadDocument(true).then(onSuccess, onFailure);
           });
         }, onFailure);
@@ -396,17 +454,25 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
     });
 
     handler.on('RenderPageRequest', function wphSetupRenderPage(data) {
-      pdfManager.getPage(data.pageIndex).then(function(page) {
+      var pageIndex = data.pageIndex;
+      pdfManager.getPage(pageIndex).then(function(page) {
+        var task = new WorkerTask('RenderPageRequest: page ' + pageIndex);
+        startWorkerTask(task);
 
-        var pageNum = data.pageIndex + 1;
+        var pageNum = pageIndex + 1;
         var start = Date.now();
         // Pre compile the pdf page and fetch the fonts/images.
-        page.getOperatorList(handler, data.intent).then(function(operatorList) {
+        page.getOperatorList(handler, task, data.intent).then(
+            function(operatorList) {
+          finishWorkerTask(task);
 
           info('page=' + pageNum + ' - getOperatorList: time=' +
-               (Date.now() - start) + 'ms, len=' + operatorList.fnArray.length);
-
+               (Date.now() - start) + 'ms, len=' + operatorList.totalLength);
         }, function(e) {
+          finishWorkerTask(task);
+          if (task.terminated) {
+            return; // ignoring errors from the terminated thread
+          }
 
           var minimumStackMessage =
             'worker.js: while trying to getPage() and getOperatorList()';
@@ -441,13 +507,23 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
     }, this);
 
     handler.on('GetTextContent', function wphExtractText(data) {
-      return pdfManager.getPage(data.pageIndex).then(function(page) {
-        var pageNum = data.pageIndex + 1;
+      var pageIndex = data.pageIndex;
+      return pdfManager.getPage(pageIndex).then(function(page) {
+        var task = new WorkerTask('GetTextContent: page ' + pageIndex);
+        startWorkerTask(task);
+        var pageNum = pageIndex + 1;
         var start = Date.now();
-        return page.extractTextContent().then(function(textContent) {
+        return page.extractTextContent(task).then(function(textContent) {
+          finishWorkerTask(task);
           info('text indexing: page=' + pageNum + ' - time=' +
                (Date.now() - start) + 'ms');
           return textContent;
+        }, function (reason) {
+          finishWorkerTask(task);
+          if (task.terminated) {
+            return; // ignoring errors from the terminated thread
+          }
+          throw reason;
         });
       });
     });
@@ -457,7 +533,22 @@ var WorkerMessageHandler = PDFJS.WorkerMessageHandler = {
     });
 
     handler.on('Terminate', function wphTerminate(data) {
-      pdfManager.terminate();
+      terminated = true;
+      if (pdfManager) {
+        pdfManager.terminate();
+        pdfManager = null;
+      }
+      if (cancelXHRs) {
+        cancelXHRs();
+      }
+
+      var waitOn = [];
+      WorkerTasks.forEach(function (task) {
+        waitOn.push(task.finished);
+        task.terminate();
+      });
+
+      return Promise.all(waitOn).then(function () {});
     });
   }
 };
